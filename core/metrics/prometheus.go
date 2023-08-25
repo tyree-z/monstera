@@ -43,6 +43,7 @@ var (
 	topIPs = make(map[string]int)
 	endpoints    = make(map[string]int)
 	exportedEPs  = make(map[string]bool)
+	topEndpoints = make(map[string]int)
 	endpointRequestCountThreshold = 2
 	
 	mu = &sync.RWMutex{}
@@ -60,6 +61,14 @@ func RecordEndpointRequest(endpoint string) {
 
 	if exportedEPs[endpoint] {
 		endpointRequestCount.WithLabelValues(endpoint).Inc()
+	}
+
+    // Update topEndpoints map
+    topEndpoints[endpoint] = endpoints[endpoint]
+
+    // Prune if we have more than 50 endpoints
+	if len(topEndpoints) > 50 {
+		pruneEndpoints()
 	}
 }
 
@@ -124,5 +133,29 @@ func pruneUserAgents() {
 	for i := 50; i < len(uafList); i++ {
 		delete(userAgents, uafList[i].ua)
 		userAgentRequestCount.DeleteLabelValues(uafList[i].ua)
+	}
+}
+
+func pruneEndpoints() {
+	type endpointFreq struct {
+		ep    string
+		count int
+	}
+
+	// Convert the map to a slice for sorting
+	var epfList []endpointFreq
+	for ep, freq := range topEndpoints {
+		epfList = append(epfList, endpointFreq{ep, freq})
+	}
+
+	// Sort based on frequency
+	sort.Slice(epfList, func(i, j int) bool {
+		return epfList[i].count > epfList[j].count
+	})
+
+	// Keep only the top 50 endpoints
+	for i := 50; i < len(epfList); i++ {
+		delete(topEndpoints, epfList[i].ep)
+		endpointRequestCount.DeleteLabelValues(epfList[i].ep)
 	}
 }

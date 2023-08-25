@@ -42,3 +42,15 @@ func UpdateBackendMapPeriodically(interval time.Duration) {
 		time.Sleep(interval)
 	}
 }
+func GetActiveDomains() []string {
+	mapMutex.RLock()
+	defer mapMutex.RUnlock()
+	
+	var activeDomains []string
+	for domain := range backendMap {
+		activeDomains = append(activeDomains, domain)
+	}
+	log.Printf("Active domains: %v", activeDomains)
+
+	return activeDomains
+}
