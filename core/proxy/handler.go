@@ -1,7 +1,12 @@
+// TODO
+// Fix SSL Termination
+//
+
 package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"net"
 	"net/http"
@@ -14,7 +19,37 @@ import (
 )
 
 
+var tlsVersionStr = map[uint16]string{
+    tls.VersionSSL30: "SSL 3.0",
+    tls.VersionTLS10: "TLS 1.0",
+    tls.VersionTLS11: "TLS 1.1",
+    tls.VersionTLS12: "TLS 1.2",
+    tls.VersionTLS13: "TLS 1.3",
+    // Add more versions if they are introduced in the future.
+}
+
+var cipherSuiteStr = map[uint16]string{
+    // You can add all the cipher suites here as needed. 
+    // This is just a small example subset.
+    tls.TLS_AES_128_GCM_SHA256:       "TLS_AES_128_GCM_SHA256",
+    tls.TLS_AES_256_GCM_SHA384:       "TLS_AES_256_GCM_SHA384",
+    tls.TLS_CHACHA20_POLY1305_SHA256: "TLS_CHACHA20_POLY1305_SHA256",
+    // ... add more cipher suites based on the crypto/tls package
+}
+
+
 func HandleRequest(w http.ResponseWriter, r *http.Request) {
+    if r.TLS != nil {
+        log.Printf("TLS Version: %s", tlsVersionStr[r.TLS.Version])
+        log.Printf("Cipher Suite: %s", cipherSuiteStr[r.TLS.CipherSuite])
+        log.Printf("Server Name (SNI): %s", r.TLS.ServerName)
+        log.Printf("Peer Certificates: %v", r.TLS.PeerCertificates) // this logs certificate chains
+        log.Printf("Negotiated Protocol: %s", r.TLS.NegotiatedProtocol)
+        // ... any other fields you're interested in
+    } else {
+        log.Println("Not a TLS connection")
+    }
+
 	host := r.Host
 	userAgent := r.Header.Get("User-Agent")
 		if userAgent != "" {
