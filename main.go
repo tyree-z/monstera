@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +28,49 @@ type ConfigCache struct {
     Data      Configuration
     Timestamp time.Time
 }
+type RequestLogEntry struct {
+    Timestamp    time.Time
+    RequestMethod string
+    RequestURL    string
+    ResponseStatus int
+    ErrorMessage  string
+    // Add more fields as needed
+}
+type loggingResponseWriter struct {
+    http.ResponseWriter
+    statusCode int
+}
+
+type monsteraResponseWriter struct {
+    http.ResponseWriter
+    statusCode int
+    writeErr   error
+}
+
+func (mrw *monsteraResponseWriter) WriteHeader(code int) {
+    mrw.statusCode = code
+    mrw.ResponseWriter.WriteHeader(code)
+}
+
+func (mrw *monsteraResponseWriter) Write(b []byte) (int, error) {
+    if mrw.writeErr != nil {
+        return 0, mrw.writeErr
+    }
+    n, err := mrw.ResponseWriter.Write(b)
+    if err != nil {
+        mrw.writeErr = err
+    }
+    return n, err
+}
+
+// Implement the Hijack method. allows server to agree to proto switching
+func (crw *monsteraResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+    if hijacker, ok := crw.ResponseWriter.(http.Hijacker); ok {
+        return hijacker.Hijack()
+    }
+    return nil, nil, fmt.Errorf("the underlying ResponseWriter does not support hijacking")
+}
+
 
 var (
 	config     Configuration
@@ -42,22 +87,33 @@ func main() {
         log.Fatalf("Failed to fetch initial configuration: %v", err)
 	}
 
-	http.HandleFunc("/", setHeaders(handleRequest))
-
-	certManager := autocert.Manager{
-		Prompt: autocert.AcceptTOS,
-		Cache:  autocert.DirCache("certs"),
-		HostPolicy: func(ctx context.Context, host string) error {
-			configLock.RLock()
-			defer configLock.RUnlock()
-			if _, ok := config[host]; ok {
-				return nil
-			}
-			return fmt.Errorf("acme/autocert: host %q not configured", host)
-		},
-	}
+    http.Handle("/", loggingMiddleware(http.HandlerFunc(setHeaders(handleRequest))))
+    
+    certManager := autocert.Manager{
+        Prompt: autocert.AcceptTOS,
+        Cache:  autocert.DirCache("certs"),
+        HostPolicy: func(ctx context.Context, host string) error {
+            configLock.RLock()
+            defer configLock.RUnlock()
+            if _, ok := config[host]; ok {
+                return nil
+            }
+            err := fmt.Errorf("acme/autocert: host %q not configured", host)
+            log.Printf("HostPolicy error: %v", err) // Log the error
+            // Handle or report the unconfigured host as needed
+            return err
+        },
+    }
 	
     tlsConfig := certManager.TLSConfig()
+    tlsConfig.GetCertificate = func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+    cert, err := certManager.GetCertificate(clientHello)
+    if err != nil {
+        // Log the TLS error
+        log.Printf("TLS error for %v: %v", clientHello.ServerName, err)
+    }
+    return cert, err
+}
 
     tlsConfig.MinVersion = tls.VersionTLS12
     tlsConfig.MaxVersion = tls.VersionTLS13
@@ -92,13 +148,16 @@ func main() {
 		})
 
 		log.Println("Monstera Listening on :http")
-		log.Fatal(http.ListenAndServe(":http", httpHandlerFunc))
+		http.ListenAndServe(":http", httpHandlerFunc)
 	}()
 
 	go updateConfigPeriodically()
 
-	log.Println("Monstera Listening on :https")
-	log.Fatal(server.ListenAndServeTLS("", "")) // Key and cert are coming from Let's Encrypt
+    log.Println("Monstera Listening on :https")
+    err = server.ListenAndServeTLS("", "") // Key and cert are coming from Let's Encrypt
+    if err != nil {
+        log.Fatalf("Server failed: %v", err)
+    }
 }
 
 func fetchConfigFromAPI(apiURL string) (Configuration, error) {
@@ -178,7 +237,7 @@ func setHeaders(next http.HandlerFunc) http.HandlerFunc {
 
 
 func handleRequest(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Handling request for %s", r.Host)
+	// log.Printf("Handling request for %s", r.Host)
 	configLock.RLock()
 	targetURL, ok := config[r.Host]
 	configLock.RUnlock()
@@ -197,7 +256,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
 
-
+    proxy.ErrorLog = log.New(os.Stderr, "PROXY ERROR: ", log.LstdFlags)
+    proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+        log.Printf("Error proxying request %s %s: %v", r.Method, r.URL.String(), err)
+        http.Error(w, "Proxy Error", http.StatusBadGateway)
+    }
     proxy.ModifyResponse = func(response *http.Response) error {
         if strings.Contains(response.Header.Get("Content-Type"), "text/html") {
             body, err := ioutil.ReadAll(response.Body)
@@ -221,8 +284,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
         return nil
     }
 
-
+    mrw := &monsteraResponseWriter{ResponseWriter: w}
 	proxy.ServeHTTP(w, r)
+    logRequest(r, w.(*monsteraResponseWriter).statusCode, w.(*monsteraResponseWriter).writeErr)
+    if mrw.writeErr != nil {
+        log.Printf("Error writing response: %v", mrw.writeErr)
+        // Perform any additional error handling as needed
+    }
 }
 
 func updateConfigPeriodically() {
@@ -308,3 +376,33 @@ func insertGAScript(bodyNode *html.Node) {
 }
 
 
+func logRequest(r *http.Request, status int, err error) {    
+    entry := RequestLogEntry{
+        Timestamp:     time.Now(),
+        RequestMethod: r.Method,
+        RequestURL:    r.URL.String(),
+        ResponseStatus: status,
+        ErrorMessage:  "",
+    }
+
+    if err != nil {
+        entry.ErrorMessage = err.Error()
+    }
+
+    // log.Printf("%+v\n", entry)
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        mrw := &monsteraResponseWriter{ResponseWriter: w}
+        next.ServeHTTP(mrw, r)
+
+        // Log the request with status code and any write error
+        logRequest(r, mrw.statusCode, mrw.writeErr)
+    })
+}
+
+func (lrw *loggingResponseWriter) WriteHeader(code int) {
+    lrw.statusCode = code
+    lrw.ResponseWriter.WriteHeader(code)
+}
