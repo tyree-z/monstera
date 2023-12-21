@@ -1,19 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/net/html"
 )
 
 type Configuration map[string]string
@@ -179,6 +184,32 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
+
+
+    proxy.ModifyResponse = func(response *http.Response) error {
+        if strings.Contains(response.Header.Get("Content-Type"), "text/html") {
+            body, err := ioutil.ReadAll(response.Body)
+            if err != nil {
+                return err // handle error
+            }
+            err = response.Body.Close()
+            if err != nil {
+                return err // handle error
+            }
+
+            modifiedBody, err := insertScript(body)
+            if err != nil {
+                return err // handle error
+            }
+
+            response.Body = ioutil.NopCloser(bytes.NewReader(modifiedBody))
+            response.ContentLength = int64(len(modifiedBody))
+            response.Header.Set("Content-Length", strconv.Itoa(len(modifiedBody)))
+        }
+        return nil
+    }
+
+
 	proxy.ServeHTTP(w, r)
 }
 
@@ -201,5 +232,67 @@ func updateConfigPeriodically() {
     }
 }
 
+func insertScript(body []byte) ([]byte, error) {
+    doc, err := html.Parse(bytes.NewReader(body))
+    if err != nil {
+        return nil, err
+    }
+
+    // Traverse the HTML nodes
+    traverseNodes(doc, func(n *html.Node) {
+        if n.Type == html.ElementNode && n.Data == "body" {
+            insertGAScript(n)
+        }
+    })
+
+    var buf bytes.Buffer
+    err = html.Render(&buf, doc)
+    if err != nil {
+        return nil, err
+    }
+
+    return buf.Bytes(), nil
+}
+
+func traverseNodes(n *html.Node, f func(*html.Node)) {
+    if n.Type == html.ElementNode && n.Data == "body" {
+        f(n)
+        return
+    }
+
+    for child := n.FirstChild; child != nil; child = child.NextSibling {
+        traverseNodes(child, f)
+    }
+}
+
+func insertGAScript(bodyNode *html.Node) {
+    script1 := &html.Node{
+        Type: html.ElementNode,
+        Data: "script",
+        Attr: []html.Attribute{
+            {Key: "async", Val: ""},
+            {Key: "src", Val: "https://www.googletagmanager.com/gtag/js?id=Bonk"},
+        },
+    }
+
+    script2 := &html.Node{
+        Type: html.ElementNode,
+        Data: "script",
+    }
+    script2Content := &html.Node{
+        Type: html.TextNode,
+        Data: `
+          window.dataLayer = window.dataLayer || [];
+          function gtag(){dataLayer.push(arguments);}
+          gtag('js', new Date());
+
+          gtag('config', 'Bonk');
+        `,
+    }
+    script2.AppendChild(script2Content)
+
+    bodyNode.AppendChild(script1)
+    bodyNode.AppendChild(script2)
+}
 
 
