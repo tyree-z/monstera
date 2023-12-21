@@ -34,7 +34,6 @@ type RequestLogEntry struct {
     RequestURL    string
     ResponseStatus int
     ErrorMessage  string
-    // Add more fields as needed
 }
 type loggingResponseWriter struct {
     http.ResponseWriter
@@ -100,7 +99,6 @@ func main() {
             }
             err := fmt.Errorf("acme/autocert: host %q not configured", host)
             log.Printf("HostPolicy error: %v", err) // Log the error
-            // Handle or report the unconfigured host as needed
             return err
         },
     }
