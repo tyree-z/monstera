@@ -2,7 +2,7 @@ version: 1
 
 env:
     GO111MODULE: on
-    CGO_ENABLED: "0" # It's advisable to wrap numeric values in quotes to ensure they're interpreted as strings.
+    CGO_ENABLED: 0
 
 flags:
     - "-trimpath"
