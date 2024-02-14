@@ -1,21 +1,20 @@
 version: 1
 
 env:
-    GO111MODULE: on
-    CGO_ENABLED: 0
+    - GO111MODULE=on
+    - CGO_ENABLED=0
+    -
+builds:
+    - env:
+          - CGO_ENABLED=0
+      goos:
+          - linux
+          - windows
+          - darwin
 
 flags:
     - "-trimpath"
     - "-tags=netgo"
-
-goos:
-    - windows
-    - linux
-    - darwin
-
-goarch:
-    - amd64
-    - arm64
 
 binary: binary-{{ .Os }}-{{ .Arch }}
 
